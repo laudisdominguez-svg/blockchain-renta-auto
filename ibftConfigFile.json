@@ -1,0 +1,24 @@
+{
+  "genesis": {
+    "config": {
+      "chainId": 2026,
+      "ibft2": {
+        "blockperiodseconds": 2,
+        "epochlength": 30000,
+        "requesttimeoutseconds": 4
+      }
+    },
+    "nonce": "0x0",
+    "timestamp": "0x0",
+    "extraData": "",
+    "gasLimit": "0x47b760",
+    "difficulty": "0x1",
+    "alloc": {}
+  },
+  "blockchain": {
+    "nodes": {
+      "generate": true,
+      "count": 4
+    }
+  }
+}
