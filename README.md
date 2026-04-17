@@ -24,3 +24,44 @@ Invoke-RestMethod -Uri http://localhost:<PUERTO_RPC_NODEX> -Method Post -Content
 - Manejo de puertos RPC y P2P para evitar conflictos.
 - Verificación de bloques mediante RPC en PowerShell.
 - Preparación para conexión con Metamask.
+
+  # 🚗 Car Rental Tokenization - Hyperledger Besu
+
+Proyecto de tokenización de alquiler de vehículos utilizando una red privada de **Hyperledger Besu** y el estándar de contratos actualizables (**UUPS Proxy**).
+
+## 🛠️ Retos Técnicos y Soluciones (Post-Mortem)
+
+Durante el desarrollo y despliegue de este proyecto, se enfrentaron diversos retos técnicos que fueron documentados para el aprendizaje continuo:
+
+### 1. Error HH700: Artifact for contract not found
+*   **Problema:** Al ejecutar el script de despliegue, Hardhat no encontraba el contrato compilado.
+*   **Causa:** Una discrepancia entre el nombre del contrato definido en Solidity (`contract CarRentalToken`) y el nombre llamado en el script de despliegue `getContractFactory()`.
+*   **Solución:** Se sincronizaron los nombres y se forzó una recompilación limpia.
+*   **Comando:** `npx hardhat compile`
+
+### 2. Gestión de Dependencias (Ecosystem Conflict)
+*   **Problema:** Errores de módulos faltantes al intentar usar `@nomicfoundation/hardhat-toolbox` en conjunto con los plugins de OpenZeppelin.
+*   **Solución:** Se optó por una instalación modular, instalando específicamente solo los paquetes necesarios para reducir la sobrecarga de dependencias y evitar conflictos de versiones.
+*   **Comando:** `npm install --save-dev @nomicfoundation/hardhat-ethers ethers @openzeppelin/hardhat-upgrades dotenv`
+
+### 3. Sincronización con el Nodo Hyperledger Besu
+*   **Problema:** Errores de conexión `JsonRpcProvider` al intentar desplegar.
+*   **Causa:** El nodo RPC de la red privada no estaba recibiendo peticiones en el puerto `8545`.
+*   **Solución:** Se implementó una verificación de salud del nodo mediante `curl` antes del despliegue para asegurar que la red estuviera lista para recibir transacciones.
+*   **Comando de verificación:** 
+    ```bash
+    curl -X POST --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' http://127.0.0.1:8545
+    ```
+
+### 4. Implementación de Arquitectura de Proxy (UUPS)
+*   **Reto:** Configurar el script de despliegue para que el contrato fuera actualizable.
+*   **Solución:** Se utilizó el plugin `@openzeppelin/hardhat-upgrades` para separar la lógica de negocio (implementación) del estado del contrato (proxy), permitiendo futuras actualizaciones sin cambiar la dirección del contrato.
+
+---
+
+## 🚀 Cómo ejecutar este proyecto
+
+1. **Instalar dependencias:** `npm install`
+2. **Configurar variables de entorno:** Crear un archivo `.env` basado en `.env.example`.
+3. **Compilar:** `npx hardhat compile`
+4. **Desplegar:** `npx hardhat run scripts/deploy.js --network besu`
