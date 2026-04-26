@@ -1,0 +1,56 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Hardhat / Truffle / Ethers
+cache/
+artifacts/
+
+# Emvironment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+#Coverge
+coverage/
+coveraje.json
+
+#Compiled contracts
+compiled/
+build/
+dist/
+
+# Private keys and wallet data
+*.pem
+*.key
+*.p12
+*.pfx
+mnemonic.txt
+wallet.json
+private_key*
+.secret
+.secrets
+
+# sensitive configs 
+config.local.*
+.env.production.local
+
+# VSCode
+.vscode/
+
+@ Os files
+.DS_Store
+Thumbs.db
+
+#Reports and audits
+audits/*.md
+audits/*.txt
+
+# Private keys and secrets
+keys/
+secrets/      
