@@ -3,97 +3,368 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/Ownable-upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol;
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
 
-contract CarRentalToken is Initializable, OwnableUpgradeable, UUPSUpgradeable {
+/// @title CarRentalToken
+/// @notice Contrato inteligente para plataforma descentralizada de alquiler de vehículos
+/// @dev Implementa patrón UUPS proxy upgradeable con protección contra reentrancia
+contract CarRentalToken is 
+    Initializable, 
+    OwnableUpgradeable, 
+    UUPSUpgradeable,
+    ReentrancyGuardUpgradeable 
+{
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STRUCTS
+    // ─────────────────────────────────────────────────────────────────────────────
 
+    /// @notice Estructura que representa un vehículo en el sistema
+    struct Car {
+        uint256 id;
+        string model;
+        uint256 marketValue;
+        string plate;
+        uint256 rentalPrice;
+        bool isAvailable;
+        address currentRenter;
+    }
 
-struct Car {
-    uint256 id;
-    string model;
-    uint256 marketValue;
-    string plate; 
-    uint256 rentalPrice;
-    bool isAvailable;
-    address currentRenter;
-}
+    /// @notice Estructura para tracking de rentals activos
+    struct Rental {
+        uint256 carId;
+        address renter;
+        uint256 startDate;
+        uint256 endDate;
+        uint256 depositAmount;
+        bool isActive;
+        bool damageReported;
+    }
 
-mapping(uint256 => Car) public cars;
+    /// @notice Estructura para transacciones/pagos
+    struct Transaction {
+        address user;
+        uint256 amount;
+        string transactionType; // "rental", "deposit_return", "damage_fee"
+        uint256 timestamp;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // STATE VARIABLES
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    mapping(uint256 => Car) public cars;
     uint256[] public carIds;
     uint256 public carCount;
-    address public owner;
-    mapping(address => bool) public isLoyalCostumer;
-    uint256 public penaltyPercentage;
-
-function initialize() public initializer {
-    __Ownable_init();
-    __UUPSUpgradeable_init();
-    owner = msg.sender;
-    penaltyPercentage = 10;
-}
-
-function addCar(uint256 _id, string memory _model) public onlyOwner {
-    cars[_id] = Car(_id, _model, 0, "", 0, true, address(0));
-    carIds.push(_id);
-    carCount++;
-}
- 
-function countAvailableCars() public view returns (uint256) {
-    uint256 count = 0;
-    for (uint256 i = 0; i < carIds.length; i++) {
-        if (cars[carIds[i]].isAvailable) {
-            count++;
-        }
-    }
-    return count;
-} 
-
-// FUNCIONES DEL NEGOCIO
-
-function getDepositAmount(uint256 _id) public view returns (uint256) {
-    uint256 price = cars[_id].rentalPrice;
-    uint256 depositFee = (price * 20) / 100;  // calculo del 20%
     
-    if (isLoyalCostumer[msg.sender]) {
-        depositFee = depositFee / 2;  // Descuento del 50% para clientes leales
+    // Optimización de gas: tracking O(1) en lugar de loops
+    mapping(bool => uint256) public carCountByStatus;
+    
+    mapping(address => bool) public isLoyalCustomer;
+    uint256 public penaltyPercentage;
+    uint256 public depositPercentage;
+    uint256 public damagePercentage;
+
+    // Rentals tracking
+    mapping(uint256 => Rental[]) public rentalHistory;
+    mapping(address => uint256[]) public userRentals;
+    Rental[] public activeRentals;
+
+    // Transacciones
+    Transaction[] public transactionHistory;
+    mapping(address => uint256) public userBalance;
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // EVENTS
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    event CarAdded(uint256 indexed carId, string model, uint256 rentalPrice);
+    event CarRemoved(uint256 indexed carId);
+    event CarRented(uint256 indexed carId, address indexed renter, uint256 days, uint256 depositAmount);
+    event CarReturned(uint256 indexed carId, address indexed renter, bool damageReported);
+    event DepositRefunded(address indexed customer, uint256 amount);
+    event DamageFeeCharged(uint256 indexed carId, address indexed renter, uint256 amount);
+    event LoyalCustomerUpdated(address indexed customer, bool status);
+    event PenaltyPercentageUpdated(uint256 newPercentage);
+    event TransactionRecorded(address indexed user, uint256 amount, string transactionType, uint256 timestamp);
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // INITIALIZER
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Inicializa el contrato proxy
+    function initialize() public initializer {
+        __Ownable_init();
+        __UUPSUpgradeable_init();
+        __ReentrancyGuard_init();
+        penaltyPercentage = 10;
+        depositPercentage = 20;
+        damagePercentage = 50;
     }
-    return depositFee;
-}
 
-function calculateTotalRent(uint256 _id, uint256 _days) public view returns (uint256) {
-    uint256 total = cars[_id].rentalPrice * _days;
+    // ─────────────────────────────────────────────────────────────────────────────
+    // CAR MANAGEMENT FUNCTIONS
+    // ─────────────────────────────────────────────────────────────────────────────
 
-    if (_days > 7) {
-        uint256 extraCharge = (total * penaltyPercentage) / 100;
-        total = total + extraCharge;
+    /// @notice Agrega un auto básico (solo ID y modelo)
+    /// @param _id ID único del auto
+    /// @param _model Modelo del vehículo
+    function addCar(uint256 _id, string memory _model) public onlyOwner {
+        require(_id > 0, "Car ID debe ser > 0");
+        require(bytes(_model).length > 0, "Model no puede estar vacio");
+        require(cars[_id].id == 0, "Car ID ya existe");
+
+        cars[_id] = Car(_id, _model, 0, "", 0, true, address(0));
+        carIds.push(_id);
+        carCount++;
+        carCountByStatus[true]++;
+
+        emit CarAdded(_id, _model, 0);
     }
 
-    if (isLoyalCostumer[msg.sender]) {
-        total = total / 2;
+    /// @notice Agrega un auto completo con todos los detalles
+    /// @param _id ID único del auto
+    /// @param _model Modelo del vehículo
+    /// @param _marketValue Valor de mercado del auto
+    /// @param _plate Placa del vehículo
+    /// @param _rentalPrice Precio de alquiler diario
+    function addCarOne(
+        uint256 _id,
+        string memory _model,
+        uint256 _marketValue,
+        string memory _plate,
+        uint256 _rentalPrice
+    ) public onlyOwner {
+        require(_id > 0, "Car ID debe ser > 0");
+        require(bytes(_model).length > 0, "Model no puede estar vacio");
+        require(_marketValue > 0, "Market value debe ser > 0");
+        require(bytes(_plate).length > 0, "Plate no puede estar vacio");
+        require(_rentalPrice > 0, "Rental price debe ser > 0");
+        require(cars[_id].id == 0, "Car ID ya existe");
+
+        cars[_id] = Car(_id, _model, _marketValue, _plate, _rentalPrice, true, address(0));
+        carIds.push(_id);
+        carCount++;
+        carCountByStatus[true]++;
+
+        emit CarAdded(_id, _model, _rentalPrice);
     }
-    return total;
-}
-function calculateDamageFee(uint256 _id) public view returns (uint256) {
-    return (cars[_id].marketValue * 50) / 100;
-}
-  
-  //FUNCIONES ADMINISTRATIVAS
 
-function addCarOne(
-    uint256 _id,
-    string memory _model,
-    uint256 _marketValue,
-    string memory _plate,
-    uint256 _rentalPrice
-) public onlyOwner {
-    cars[_id] = Car(_id, _model, _marketValue, _plate, _rentalPrice, true, address(0));
-    carIds.push(_id);
-    carCount++;
-}
+    /// @notice Cuenta autos disponibles con O(1) complexity
+    /// @return Número de autos disponibles
+    function countAvailableCars() public view returns (uint256) {
+        return carCountByStatus[true];
+    }
 
-function setLoyalCustomer(address _customer, bool _status) public onlyOwner {
-    isLoyalCostumer[_customer] = _status;
-}
+    /// @notice Obtiene todos los IDs de autos
+    /// @return Array de IDs de autos
+    function getAllCarIds() public view returns (uint256[] memory) {
+        return carIds;
+    }
 
-function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    // ─────────────────────────────────────────────────────────────────────────────
+    // PRICING FUNCTIONS
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Calcula el monto de depósito requerido
+    /// @param _id ID del auto
+    /// @return Monto del depósito en wei
+    /// @dev Aplica descuento del 50% a clientes leales
+    function getDepositAmount(uint256 _id) public view returns (uint256) {
+        require(cars[_id].id != 0, "Auto no existe");
+        
+        uint256 price = cars[_id].rentalPrice;
+        uint256 depositFee = (price * depositPercentage) / 100;
+
+        if (isLoyalCustomer[msg.sender]) {
+            depositFee = depositFee / 2;
+        }
+        return depositFee;
+    }
+
+    /// @notice Calcula el precio total de alquiler
+    /// @param _id ID del auto
+    /// @param _days Número de días de alquiler
+    /// @return Precio total en wei
+    /// @dev Aplica recargo del 10% si > 7 días, descuento 50% si cliente leal
+    function calculateTotalRent(uint256 _id, uint256 _days) public view returns (uint256) {
+        require(cars[_id].id != 0, "Auto no existe");
+        require(_days > 0, "Dias debe ser > 0");
+
+        uint256 total = cars[_id].rentalPrice * _days;
+
+        if (_days > 7) {
+            uint256 extraCharge = (total * penaltyPercentage) / 100;
+            total = total + extraCharge;
+        }
+
+        if (isLoyalCustomer[msg.sender]) {
+            total = total / 2;
+        }
+        return total;
+    }
+
+    /// @notice Calcula la tarifa por daño
+    /// @param _id ID del auto
+    /// @return Monto de la tarifa por daño (50% del valor de mercado)
+    function calculateDamageFee(uint256 _id) public view returns (uint256) {
+        require(cars[_id].id != 0, "Auto no existe");
+        return (cars[_id].marketValue * damagePercentage) / 100;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // RENTAL FUNCTIONS
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Renta un auto por el usuario
+    /// @param _carId ID del auto a rentar
+    /// @param _days Número de días de alquiler
+    function rentCar(uint256 _carId, uint256 _days) public payable nonReentrant {
+        require(cars[_carId].id != 0, "Auto no existe");
+        require(cars[_carId].isAvailable, "Auto no disponible");
+        require(_days > 0, "Dias debe ser > 0");
+
+        uint256 depositAmount = getDepositAmount(_carId);
+        uint256 totalCost = calculateTotalRent(_carId, _days);
+        uint256 totalRequired = depositAmount + totalCost;
+
+        require(msg.value >= totalRequired, "Monto insuficiente");
+
+        // Actualizar estado del auto
+        cars[_carId].isAvailable = false;
+        cars[_carId].currentRenter = msg.sender;
+        carCountByStatus[true]--;
+        carCountByStatus[false]++;
+
+        // Crear registro de rental
+        Rental memory newRental = Rental({
+            carId: _carId,
+            renter: msg.sender,
+            startDate: block.timestamp,
+            endDate: block.timestamp + (_days * 1 days),
+            depositAmount: depositAmount,
+            isActive: true,
+            damageReported: false
+        });
+
+        uint256 rentalIndex = rentalHistory[_carId].length;
+        rentalHistory[_carId].push(newRental);
+        userRentals[msg.sender].push(_carId);
+        activeRentals.push(newRental);
+
+        // Registrar transacción
+        recordTransaction(msg.sender, totalCost, "rental");
+
+        emit CarRented(_carId, msg.sender, _days, depositAmount);
+    }
+
+    /// @notice Devuelve un auto rentado
+    /// @param _carId ID del auto a devolver
+    /// @param _damageReported Indica si hay daños reportados
+    function returnCar(uint256 _carId, bool _damageReported) public nonReentrant {
+        require(cars[_carId].id != 0, "Auto no existe");
+        require(cars[_carId].currentRenter == msg.sender, "No eres el rentador actual");
+
+        Rental[] storage rentals = rentalHistory[_carId];
+        Rental storage activeRental = rentals[rentals.length - 1];
+
+        require(activeRental.isActive, "No hay rental activo");
+
+        uint256 damageFee = 0;
+        if (_damageReported) {
+            damageFee = calculateDamageFee(_carId);
+            recordTransaction(msg.sender, damageFee, "damage_fee");
+            emit DamageFeeCharged(_carId, msg.sender, damageFee);
+        }
+
+        // Procesar devolución del depósito
+        uint256 depositRefund = activeRental.depositAmount - damageFee;
+        if (depositRefund > 0) {
+            userBalance[msg.sender] += depositRefund;
+            recordTransaction(msg.sender, depositRefund, "deposit_return");
+            emit DepositRefunded(msg.sender, depositRefund);
+        }
+
+        // Actualizar estado
+        activeRental.isActive = false;
+        activeRental.damageReported = _damageReported;
+        cars[_carId].isAvailable = true;
+        cars[_carId].currentRenter = address(0);
+        carCountByStatus[true]++;
+        carCountByStatus[false]--;
+
+        emit CarReturned(_carId, msg.sender, _damageReported);
+    }
+
+    /// @notice Obtiene el historial de rentals del usuario
+    /// @return Array de IDs de autos rentados por el usuario
+    function getUserRentals() public view returns (uint256[] memory) {
+        return userRentals[msg.sender];
+    }
+
+    /// @notice Obtiene el historial completo de transacciones
+    /// @return Array de todas las transacciones
+    function getTransactionHistory() public view returns (Transaction[] memory) {
+        return transactionHistory;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ADMIN FUNCTIONS
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Marca un cliente como leal
+    /// @param _customer Dirección del cliente
+    /// @param _status Estado de cliente leal
+    function setLoyalCustomer(address _customer, bool _status) public onlyOwner {
+        require(_customer != address(0), "Direccion invalida");
+        isLoyalCustomer[_customer] = _status;
+        emit LoyalCustomerUpdated(_customer, _status);
+    }
+
+    /// @notice Actualiza el porcentaje de penalidad
+    /// @param _newPercentage Nuevo porcentaje de penalidad
+    function setPenaltyPercentage(uint256 _newPercentage) public onlyOwner {
+        require(_newPercentage > 0 && _newPercentage <= 100, "Porcentaje invalido");
+        penaltyPercentage = _newPercentage;
+        emit PenaltyPercentageUpdated(_newPercentage);
+    }
+
+    /// @notice Retira fondos del contrato
+    /// @param _amount Monto a retirar
+    function withdrawFunds(uint256 _amount) public onlyOwner nonReentrant {
+        require(_amount > 0, "Amount debe ser > 0");
+        require(address(this).balance >= _amount, "Saldo insuficiente");
+        
+        (bool success, ) = payable(owner()).call{value: _amount}("");
+        require(success, "Transferencia fallida");
+    }
+
+    /// @notice Registra una transacción en el historial
+    /// @param _user Dirección del usuario
+    /// @param _amount Monto de la transacción
+    /// @param _type Tipo de transacción
+    function recordTransaction(address _user, uint256 _amount, string memory _type) internal {
+        transactionHistory.push(Transaction({
+            user: _user,
+            amount: _amount,
+            transactionType: _type,
+            timestamp: block.timestamp
+        }));
+        emit TransactionRecorded(_user, _amount, _type, block.timestamp);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // UPGRADE AUTHORIZATION
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Autoriza un upgrade del contrato
+    /// @param newImplementation Dirección de la nueva implementación
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // RECEIVE ETHER
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// @notice Permite recibir ether directamente
+    receive() external payable {}
 }
